@@ -1,10 +1,77 @@
 // utils/algorithms/Quaternion.js
+
+function finite(value) {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+/**
+ * Convert a quaternion-like value to a 4-element math array [w, x, y, z].
+ *
+ * Public protocol samples expose quaternions as `{ w, x, y, z }`. Math code
+ * (matrix/serialization helpers) requires arrays. This is the single explicit
+ * boundary between the two representations.
+ *
+ * @param {object|Array|Quaternion} value
+ * @returns {number[]|null} array, or null when the value is not a valid quaternion
+ */
+export function quaternionToArray(value) {
+  if (!value) return null
+
+  let parts
+  if (Array.isArray(value)) {
+    parts = value
+  } else if (value instanceof Quaternion) {
+    parts = [value.w, value.x, value.y, value.z]
+  } else if (typeof value === 'object') {
+    parts = [value.w, value.x, value.y, value.z]
+  } else {
+    return null
+  }
+
+  if (parts.length < 4 || !parts.slice(0, 4).every(finite)) return null
+  return [parts[0], parts[1], parts[2], parts[3]]
+}
+
 export default class Quaternion {
   constructor(w = 1, x = 0, y = 0, z = 0) {
     this.w = w;
     this.x = x;
     this.y = y;
     this.z = z;
+  }
+
+  /**
+   * True when every component is finite and the quaternion has a usable norm.
+   */
+  isValid() {
+    return [this.w, this.x, this.y, this.z].every(finite) &&
+      Math.hypot(this.w, this.x, this.y, this.z) > 1e-8
+  }
+
+  /**
+   * Build from `{ w, x, y, z }`, `[w, x, y, z]`, or another Quaternion.
+   * Returns null for invalid input so callers can enforce validity explicitly.
+   */
+  static fromQuaternionLike(value) {
+    const parts = quaternionToArray(value)
+    if (!parts) return null
+    return new Quaternion(parts[0], parts[1], parts[2], parts[3])
+  }
+
+  /**
+   * Public representation used by samples and PoseFrame.
+   */
+  toObject() {
+    return { w: this.w, x: this.x, y: this.y, z: this.z }
+  }
+
+  /**
+   * Normalized copy. Returns identity when the quaternion has no usable norm.
+   */
+  normalized() {
+    if (!this.isValid()) return new Quaternion()
+    const len = Math.hypot(this.w, this.x, this.y, this.z)
+    return new Quaternion(this.w / len, this.x / len, this.y / len, this.z / len)
   }
 
   // 四元数旋转向量（世界坐标系到传感器坐标系）
@@ -117,18 +184,28 @@ export default class Quaternion {
 
   // 计算四元数之间的差异（角度）
   static angleBetween(q1, q2) {
+    if (!q1 || !q2) return 0
     const dot = q1.w * q2.w + q1.x * q2.x + q1.y * q2.y + q1.z * q2.z;
+    if (!Number.isFinite(dot)) return 0
     const angle = 2 * Math.acos(Math.min(Math.abs(dot), 1.0));
     return angle * 180 / Math.PI; // 转换为角度
   }
   
+  /**
+   * Legacy array constructor. Accepts [w, x, y, z] and never returns NaN:
+   * invalid input falls back to identity. Prefer fromQuaternionLike() when
+   * callers need to detect invalid sensor data.
+   */
   static fromArray(arr) {
-    return new Quaternion(arr[0], arr[1], arr[2], arr[3]);
+    return Quaternion.fromQuaternionLike(arr) || new Quaternion();
   }
   
   // 四元数转欧拉角（roll: X轴, pitch: Y轴, yaw: Z轴）
   toEulerAngles() {
-    
+    if (!this.isValid()) {
+      return { roll: 0, pitch: 0, yaw: 0 };
+    }
+
     const { w, x, y, z } = this;
   
     // 计算roll (x-axis rotation)
@@ -151,3 +228,5 @@ export default class Quaternion {
   }
   
 }
+
+export { Quaternion }

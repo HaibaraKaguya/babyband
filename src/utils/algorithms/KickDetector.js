@@ -15,7 +15,8 @@ export default class KickDetector {
       // 温度下降速率阈值（℃/s）：脚踝温度下降速率超过此值（负值表示下降）
       tempDropRate: options.tempDropRate || -0.15, // 下降速率应小于此值
 
-      // 大腿-腹部温差阈值（℃）：大腿温度比腹部低超过此值可能踢被
+      // 大腿-腹部温差阈值（℃）：正值表示大腿比腹部低超过此值，
+      // 可能踢被（与 TemperatureAnalyzer 的 tempDiff = temp1 - temp2 一致）
       tempDiffThresh: options.tempDiffThresh || 0.5,
 
       // 时间窗口（秒），用于计算关节角度变化（与温度分析器一致，避免混淆）
@@ -38,13 +39,24 @@ export default class KickDetector {
    * @param {number} data.tempRate1 - 腹部温度变化率（℃/s）
    * @param {number} data.tempRate2 - 大腿温度变化率（℃/s）
    * @param {number} data.tempRate3 - 脚踝温度变化率（℃/s）
-   * @param {number} data.tempDiff - 大腿-腹部温差（℃）
+   * @param {number} data.tempDiff - 腹部-大腿温差（℃），正值表示大腿更冷
    * @returns {Object} { detected: boolean, reason?: string, details?: any }
    */
   detect(data) {
-    const now = data.timestamp;
-    const { hip, knee, temp1, temp2, temp3, tempRate1, tempRate2, tempRate3, tempDiff } = data;
+    const input = data && typeof data === 'object' ? data : {};
+    const now = input.timestamp;
+    const { hip, knee, temp1, temp2, temp3, tempRate1, tempRate2, tempRate3, tempDiff } = input;
     const { jointAngleChange, tempAbsMin, tempDropRate, tempDiffThresh, timeWindow } = this.thresholds;
+
+    // 传感器标志或数值无效时直接跳过，不写入历史，也不产生报警。
+    if (input.tempValid === false || input.attitudeValid === false) {
+      return { detected: false, skipped: true, reason: 'sensor invalid' };
+    }
+
+    const numericInputs = [now, hip, knee, temp1, temp2, temp3, tempRate1, tempRate2, tempRate3, tempDiff];
+    if (!numericInputs.every(value => typeof value === 'number' && Number.isFinite(value))) {
+      return { detected: false, skipped: true, reason: 'invalid input' };
+    }
 
     // 1. 关节角度变化计算（使用历史数据）
     this.history.push({ timestamp: now, hip, knee });
@@ -88,12 +100,13 @@ export default class KickDetector {
     if (reasons.length > 0) {
       return {
         detected: true,
+        skipped: false,
         reason: reasons.join('; '),
         details: { maxJointChange, tempRate3, tempDiff, temps: [temp1, temp2, temp3] }
       };
     }
 
-    return { detected: false };
+    return { detected: false, skipped: false };
   }
 
   /**

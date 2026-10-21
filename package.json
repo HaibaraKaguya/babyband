@@ -29,7 +29,9 @@
     "build:mp-xhs": "uni build -p mp-xhs",
     "build:quickapp-webview": "uni build -p quickapp-webview",
     "build:quickapp-webview-huawei": "uni build -p quickapp-webview-huawei",
-    "build:quickapp-webview-union": "uni build -p quickapp-webview-union"
+    "build:quickapp-webview-union": "uni build -p quickapp-webview-union",
+    "test": "node --experimental-default-type=module --test tests/architecture/*.test.mjs tests/functionality/*.test.mjs tests/body3d/*.test.mjs tests/integration/*.test.mjs",
+    "build:app": "uni build -p app-plus"
   },
   "dependencies": {
     "@dcloudio/uni-app": "3.0.0-4080720251210001",
@@ -49,6 +51,7 @@
     "@dcloudio/uni-mp-xhs": "3.0.0-4080720251210001",
     "@dcloudio/uni-quickapp-webview": "3.0.0-4080720251210001",
     "@qiun/ucharts": "^2.5.0-20230101",
+    "threejs-miniprogram": "0.0.8",
     "vue": "^3.4.21",
     "vue-i18n": "^9.1.9"
   },

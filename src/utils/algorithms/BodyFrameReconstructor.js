@@ -34,21 +34,30 @@ export default class BodyFrameReconstructor {
 
   /**
    * 核心函数：从两个传感器四元数反推身体坐标系
-   * @param {Array} ankleQuat - 脚踝四元数 [qw, qx, qy, qz]
-   * @param {Array} wristQuat - 手腕四元数 [qw, qx, qy, qz]
+   * Accepts `{ w, x, y, z }` (protocol representation) or `[w, x, y, z]`.
+   * Invalid input returns an identity frame with `valid: false` instead of NaN.
+   * @param {Object|Array} ankleQuat
+   * @param {Object|Array} wristQuat
    * @returns {Object} 身体坐标系的三个轴
    */
   reconstructBodyFrame(ankleQuat, wristQuat) {
-    // 1. 将四元数转换为对象
-    const qAnkle = Quaternion.fromArray(ankleQuat);
-    const qWrist = Quaternion.fromArray(wristQuat);
+    // 1. 显式转换四元数（协议输出是对象，数学库内部用数组）
+    const qAnkle = Quaternion.fromQuaternionLike(ankleQuat);
+    const qWrist = Quaternion.fromQuaternionLike(wristQuat);
+
+    if (!qAnkle || !qWrist || !qAnkle.isValid() || !qWrist.isValid()) {
+      return this.createInvalidBodyFrame();
+    }
+
+    const qAnkleNormalized = qAnkle.normalized();
+    const qWristNormalized = qWrist.normalized();
     
     // 2. 计算重力方向（DMP的世界坐标系重力向下[0,0,1]）
     const gravityWorld = [0, 0, -1];
     
     // 将重力向量转换到传感器坐标系
-    const gravityInAnkle = qAnkle.rotateVector(gravityWorld);
-    const gravityInWrist = qWrist.rotateVector(gravityWorld);
+    const gravityInAnkle = qAnkleNormalized.rotateVector(gravityWorld);
+    const gravityInWrist = qWristNormalized.rotateVector(gravityWorld);
     
     // 3. 反推身体坐标系Z轴（垂直向上）
     // 身体Z轴 = -平均重力方向（因为重力向下，我们要向上）
@@ -70,8 +79,8 @@ export default class BodyFrameReconstructor {
     const sensorYAxis = [0, 1, 0];
     
     // 将传感器Y轴转换到世界坐标系
-    const qAnkleConj = qAnkle.conjugate();
-    const qWristConj = qWrist.conjugate();
+    const qAnkleConj = qAnkleNormalized.conjugate();
+    const qWristConj = qWristNormalized.conjugate();
     
     const yWorldAnkle = qAnkleConj.rotateVector(sensorYAxis);
     const yWorldWrist = qWristConj.rotateVector(sensorYAxis);
@@ -106,10 +115,11 @@ export default class BodyFrameReconstructor {
     this.lastBodyZ = bodyZ;
 	
     // 新增：计算传感器到身体的变换
-    this.updateSensorToBodyTransforms(qAnkle, qWrist, bodyX, bodyY, bodyZ);
+    this.updateSensorToBodyTransforms(qAnkleNormalized, qWristNormalized, bodyX, bodyY, bodyZ);
     
     // 8. 返回结果
     return {
+      valid: true,
       // 三个轴的方向向量
       X: bodyX,
       Y: bodyY,
@@ -134,11 +144,37 @@ export default class BodyFrameReconstructor {
     };
   }
   
-  
-    /**
-     * 新增：更新传感器到身体的变换矩阵
-     */
-    updateSensorToBodyTransforms(qAnkle, qWrist, bodyX, bodyY, bodyZ) {
+  /**
+   * Safe placeholder used when quaternion input is missing or invalid.
+   * Keeps the output shape stable for callers and the renderer.
+   */
+  createInvalidBodyFrame() {
+    const X = [1, 0, 0];
+    const Y = [0, 1, 0];
+    const Z = [0, 0, 1];
+    return {
+      valid: false,
+      X,
+      Y,
+      Z,
+      matrix: [
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1]
+      ],
+      eulerAngles: { roll: 0, pitch: 0, yaw: 0 },
+      debug: {
+        rawGravityAnkle: null,
+        rawGravityWrist: null,
+        rawBodyZ: null
+      }
+    };
+  }
+
+  /**
+   * 新增：更新传感器到身体的变换矩阵
+   */
+  updateSensorToBodyTransforms(qAnkle, qWrist, bodyX, bodyY, bodyZ) {
       // 身体坐标系到世界坐标系的旋转矩阵
       const bodyToWorldMatrix = [
         [bodyX[0], bodyY[0], bodyZ[0]],
@@ -341,6 +377,9 @@ export default class BodyFrameReconstructor {
     
     // 计算当前姿态
     const currentFrame = this.reconstructBodyFrame(ankleQuat, wristQuat);
+    if (!currentFrame.valid) {
+      return { success: false, reason: 'invalid quaternion input', calibratedFrame: currentFrame };
+    }
     
     // 理论上平躺时，身体坐标系应与世界坐标系对齐
     // X=[1,0,0]（前向）, Y=[0,1,0]（右侧）, Z=[0,0,1]（向上）
@@ -396,6 +435,7 @@ export default class BodyFrameReconstructor {
     
     return {
       ...checks,
+      valid: Object.values(checks).every(Boolean),
       score: Object.values(checks).filter(v => v).length / Object.keys(checks).length,
       bodyZVertical: this.bodyZ[2].toFixed(3)
     };

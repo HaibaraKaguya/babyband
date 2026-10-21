@@ -59,11 +59,11 @@
         <view v-if="debugText" class="debug">{{ debugText }}</view>
       </view>
 
-      <!-- 人体图（坐标驱动示例） -->
+      <!-- 人体姿态回放 -->
       <view class="card">
         <view class="cardTitle">
-          <text class="h2">人体图（坐标驱动示例）</text>
-          <text class="hint">（用坐标 + 温度颜色驱动：腹/腿/踝）</text>
+          <text class="h2">人体姿态回放</text>
+          <text class="hint">（拖动时间轴同步姿态与温度）</text>
         </view>
 
         <view v-if="(session.samples || []).length === 0" class="muted">暂无采样</view>
@@ -83,7 +83,8 @@
             show-value
           />
 
-          <view class="chartBox" style="margin-top: 10px;">
+          <HumanPose3D :pose="currentPoseFrame" :height="320" @ready="bodyReady = true" @error="bodyReady = false" />
+          <view v-show="!bodyReady" class="chartBox" style="margin-top: 10px;">
             <canvas canvas-id="bodyCanvas" id="bodyCanvas" class="chart" />
           </view>
 
@@ -120,7 +121,7 @@
 
         <view v-for="(e, idx) in (session.events || [])" :key="'e' + idx" class="eventRow">
           <text class="eventIdx">{{ idx + 1 }}</text>
-          <text class="eventText">{{ e.time }} - 温度下降 {{ e.drop }}℃</text>
+          <text class="eventText">{{ e.time }} - {{ e.type === 'kick' ? '疑似踢被' : '温度变化' }}{{ e.drop === '-' ? '' : ' ' + e.drop + '℃' }}</text>
         </view>
       </view>
     </view>
@@ -128,22 +129,28 @@
 </template>
 
 <script>
+import HumanPose3D from '@/components/HumanPose3D/HumanPose3D.vue'
+import { buildPoseFrame } from '@/utils/poseFrame.js'
 import uCharts from '@qiun/ucharts'
 import { computeJoints2D, tempToColor } from '@/utils/bodyKinematics.js'
 
 // 与首页一致：从本地缓存读取最近一次会话
-const SESSION_KEY = 'baby_band_last_session_v1'
+import { ChunkedSessionRepository } from '@/repositories/chunkedSessionRepository.mjs'
+import { createUniKeyValueStorage } from '@/repositories/keyValueStorage.mjs'
 
 export default {
+  components: { HumanPose3D },
   data() {
     return {
       session: null,
       chart: null,
       debugText: '',
-      selectedIdx: 0
+      selectedIdx: 0,
+      bodyReady: false
     }
   },
   computed: {
+    currentPoseFrame() { return buildPoseFrame(this.currentSample, { now: 0 }) },
     previewSamples() {
       const arr = (this.session && this.session.samples) ? this.session.samples : []
       return arr.slice(Math.max(0, arr.length - 20))
@@ -169,11 +176,15 @@ export default {
   methods: {
     loadSession() {
       try {
-        const raw = uni.getStorageSync(SESSION_KEY)
-        this.session = raw ? JSON.parse(raw) : null
+        const repository = new ChunkedSessionRepository({ storage: createUniKeyValueStorage(uni) })
+        repository.migrateLegacyFromStorage()
+        const latest = repository.listSessions()[0]
+        this.session = latest ? repository.loadSession(latest.id) : null
+        this.selectedIdx = 0
       } catch (e) {
         console.warn('loadSession failed:', e)
         this.session = null
+        uni.showToast({ title: '历史记录读取失败', icon: 'none' })
       }
     },
 
@@ -189,16 +200,17 @@ export default {
     onSliderChanging(e) {
       const v = Number(e.detail && e.detail.value)
       if (Number.isFinite(v)) {
-        this.selectedIdx = v
+        this.selectedIdx = Math.max(0, Math.min(v, (this.session?.samples?.length || 1) - 1))
         this.renderBody()
       }
     },
     onSliderChange(e) {
       const v = Number(e.detail && e.detail.value)
       if (Number.isFinite(v)) {
-        this.selectedIdx = v
+        this.selectedIdx = Math.max(0, Math.min(v, (this.session?.samples?.length || 1) - 1))
         this.renderBody()
       }
+        this.renderTempLines()
     },
 
     renderBody() {
@@ -305,7 +317,9 @@ export default {
 
         // 防止数据太多挤爆：最多显示最近 240 个点，支持左右拖动
         const maxKeep = 240
-        const pickedRaw = samples.length > maxKeep ? samples.slice(samples.length - maxKeep) : samples
+        const start = Math.max(0, Math.min(this.selectedIdx - Math.floor(maxKeep / 2), samples.length - maxKeep))
+        const pickedRaw = samples.slice(start, start + maxKeep).filter(s => s.tempValid !== false && [s.temp1, s.temp2, s.temp3].every(Number.isFinite))
+        if (pickedRaw.length < 2) { this.debugText = '当前时间段有效温度不足'; return }
 
         const categories = pickedRaw.map(s => this.fmtTime(s.ts))
         const s1 = pickedRaw.map(s => Number(s.temp1))
@@ -383,107 +397,6 @@ export default {
             line: { type: 'curve', width: 2 }
           }
         })
-
-        ctx.draw()
-      }).exec()
-    },
-
-    onSliderChanging(e) {
-      // 频繁拖动时也实时更新人体图（注意性能：这里只画一张 2D stick 图，开销很小）
-      const v = Number((e && e.detail) ? e.detail.value : this.selectedIdx)
-      this.selectedIdx = v
-      this.renderBody()
-    },
-    onSliderChange(e) {
-      const v = Number((e && e.detail) ? e.detail.value : this.selectedIdx)
-      this.selectedIdx = v
-      this.renderBody()
-    },
-
-    renderBody() {
-      const samples = (this.session && this.session.samples) ? this.session.samples : []
-      if (samples.length === 0) return
-
-      const s = this.currentSample
-
-      const q = uni.createSelectorQuery().in(this)
-      q.select('#bodyCanvas').boundingClientRect(rect => {
-        const width = Math.floor((rect && rect.width) ? rect.width : 320)
-        const height = 300
-
-        const ctx = uni.createCanvasContext('bodyCanvas', this)
-
-        // 清屏
-        ctx.clearRect(0, 0, width, height)
-
-        // 坐标映射：模型坐标 -> 屏幕坐标
-        const centerX = width / 2
-        const centerY = height * 0.68
-        const scale = height / 3.2
-        const toScreen = (p) => ({
-          x: centerX + p.x * scale,
-          y: centerY - p.y * scale
-        })
-
-        const joints = computeJoints2D(s)
-
-        // 骨架线
-        const head = toScreen(joints.head)
-        const waist = toScreen(joints.waist)
-        const ankle = toScreen(joints.ankle)
-        const wrist = toScreen(joints.wrist)
-
-        ctx.setLineWidth(3)
-        ctx.setStrokeStyle('#333')
-
-        // torso
-        ctx.beginPath()
-        ctx.moveTo(head.x, head.y)
-        ctx.lineTo(waist.x, waist.y)
-        ctx.stroke()
-
-        // leg
-        ctx.beginPath()
-        ctx.moveTo(waist.x, waist.y)
-        ctx.lineTo(ankle.x, ankle.y)
-        ctx.stroke()
-
-        // arm
-        ctx.beginPath()
-        ctx.moveTo(waist.x, (waist.y + head.y) / 2)
-        ctx.lineTo(wrist.x, wrist.y)
-        ctx.stroke()
-
-        // head circle
-        ctx.beginPath()
-        ctx.setFillStyle('#fff')
-        ctx.arc(head.x, head.y, 18, 0, Math.PI * 2)
-        ctx.fill()
-        ctx.stroke()
-
-        // 温度点（坐标+颜色）
-        const tp = joints.tempPoints || {}
-        const pWaist = toScreen(tp.waist || joints.waist)
-        const pThigh = toScreen(tp.thigh || { x: 0, y: -0.7 })
-        const pAnkle = toScreen(tp.ankle || joints.ankle)
-
-        const drawDot = (p, color, label) => {
-          ctx.beginPath()
-          ctx.setFillStyle(color)
-          ctx.arc(p.x, p.y, 10, 0, Math.PI * 2)
-          ctx.fill()
-          ctx.setStrokeStyle('#fff')
-          ctx.setLineWidth(2)
-          ctx.stroke()
-
-          ctx.setFillStyle('#111')
-          ctx.setFontSize(12)
-          ctx.fillText(label, p.x + 14, p.y + 4)
-        }
-
-        drawDot(pWaist, tempToColor(s.temp1), '腹')
-        drawDot(pThigh, tempToColor(s.temp2), '腿')
-        drawDot(pAnkle, tempToColor(s.temp3), '踝')
 
         ctx.draw()
       }).exec()

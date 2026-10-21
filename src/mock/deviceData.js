@@ -3,7 +3,7 @@
 // ✅ 改为“按协议生成一帧二进制数据 → 再走解析器”，方便联调数据接收/解析层。
 // 协议字段来自 1.24 会议纪要：帧头 0xAA55、3 处四元数、3 处温度、帧序列号、CRC16 等。
 
-import { FRAME_LEN, crc16_modbus, parseBabyBandFrame } from '@/utils/protocol/babyBandProtocol.js'
+import { FRAME_LEN, crc16_modbus, parseBabyBandFrame } from '../utils/protocol/babyBandProtocol.js'
 
 
 let tWaist = 36.4

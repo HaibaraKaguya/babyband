@@ -58,12 +58,29 @@ function getUint16BothEndian(view, offset) {
 }
 
 /**
+ * Accept ArrayBuffer / Uint8Array / other ArrayBuffer views (e.g. DataView).
+ * Returns null for unsupported input instead of throwing.
+ */
+function toByteView(input) {
+  if (input == null) return null
+  if (input instanceof Uint8Array) return input
+  if (input instanceof ArrayBuffer) return new Uint8Array(input)
+  if (ArrayBuffer.isView(input)) {
+    return new Uint8Array(input.buffer, input.byteOffset, input.byteLength)
+  }
+  return null
+}
+
+/**
  * 解析单帧（73字节）
- * @param {Uint8Array|ArrayBuffer} input
+ * @param {Uint8Array|ArrayBuffer|DataView} input
  * @returns {{ok:boolean, error?:string, sample?:object, meta?:object}}
  */
 export function parseBabyBandFrame(input) {
-  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input)
+  const bytes = toByteView(input)
+  if (!bytes) {
+    return { ok: false, error: 'frame input must be an ArrayBuffer or Uint8Array' }
+  }
   if (bytes.length !== FRAME_LEN) {
     return { ok: false, error: `frame length invalid: ${bytes.length}, expected ${FRAME_LEN}` }
   }
@@ -81,8 +98,22 @@ export function parseBabyBandFrame(input) {
   const crcOk_modbus = (crcField.le === crcCalc_modbus) || (crcField.be === crcCalc_modbus)
   const crcOk_ccitt = (crcField.le === crcCalc_ccitt) || (crcField.be === crcCalc_ccitt)
 
-  // 如果都不通过，也先返回结构化信息，方便联调排查。
   const crcOk = crcOk_modbus || crcOk_ccitt
+  const crcAlg = crcOk_modbus ? 'modbus' : (crcOk_ccitt ? 'ccitt_false' : 'unknown')
+  const meta = {
+    headerBytes: header.headerBytes,
+    crcOk,
+    crcAlg,
+    crcField,
+    crcCalc_modbus,
+    crcCalc_ccitt
+  }
+
+  // A frame with a bad checksum is never a valid sample. Returning ok:true here
+  // previously let corrupt payloads reach the algorithms and be persisted.
+  if (!crcOk) {
+    return { ok: false, error: 'crc mismatch', meta }
+  }
 
   // 数据字段解析：默认按 little-endian。
   // 如果你们固件是 big-endian，把 true 改成 false。
@@ -147,20 +178,14 @@ export function parseBabyBandFrame(input) {
     battery: null,
 
     // CRC
-    crcOk,
-    crcAlg: crcOk_modbus ? 'modbus' : (crcOk_ccitt ? 'ccitt_false' : 'unknown')
+    crcOk: true,
+    crcAlg
   }
 
   return {
     ok: true,
     sample,
-    meta: {
-      headerBytes: header.headerBytes,
-      crcOk,
-      crcField,
-      crcCalc_modbus,
-      crcCalc_ccitt
-    }
+    meta
   }
 }
 
@@ -177,7 +202,8 @@ export class BabyBandStreamParser {
    * @returns {Array<{ok:boolean, sample?:object, meta?:object, error?:string}>}
    */
   push(chunk) {
-    const incoming = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)
+    const incoming = toByteView(chunk)
+    if (!incoming) return []
     const merged = new Uint8Array(this._buf.length + incoming.length)
     merged.set(this._buf, 0)
     merged.set(incoming, this._buf.length)

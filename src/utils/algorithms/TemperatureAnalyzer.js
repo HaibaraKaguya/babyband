@@ -22,10 +22,29 @@ export default class TemperatureAnalyzer {
    * @returns {Object} 分析结果，包含温差、各部位变化率、平均温度等
    */
   analyze(data) {
-    const now = data.timestamp;
-    const temp1 = data.temp1;
-    const temp2 = data.temp2;
-    const temp3 = data.temp3;
+    const now = data && data.timestamp;
+    const temp1 = data && data.temp1;
+    const temp2 = data && data.temp2;
+    const temp3 = data && data.temp3;
+    const sensorValid = !data || data.tempValid !== false;
+    const valuesValid = [now, temp1, temp2, temp3].every(
+      value => typeof value === 'number' && Number.isFinite(value)
+    );
+
+    // 温度标志无效或字段不是有限数时，不进入历史，也不产生可用于报警的
+    // 温差/变化率，避免 NaN 或假报警向下游传播。
+    if (!sensorValid || !valuesValid) {
+      return {
+        valid: false,
+        tempDiff: null,
+        tempRate1: null,
+        tempRate2: null,
+        tempRate3: null,
+        avgTemp1: null,
+        avgTemp2: null,
+        avgTemp3: null
+      };
+    }
 
     // 添加当前数据到历史
     this.history.push({
@@ -38,8 +57,11 @@ export default class TemperatureAnalyzer {
     this.history = this.history.filter(item => item.timestamp >= cutoff);
 
     // 默认返回对象（当数据不足时，变化率为 0）
+    // 符号约定：tempDiff = 腹部 - 大腿。正值表示大腿比腹部更凉，
+    // 与 KickDetector 中“大腿暴露”的判断方向保持一致。
     const result = {
-      tempDiff: temp2 - temp1,          // 大腿与腹部温差
+      valid: true,
+      tempDiff: temp1 - temp2,
       tempRate1: 0,
       tempRate2: 0,
       tempRate3: 0,

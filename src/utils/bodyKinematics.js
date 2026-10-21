@@ -7,7 +7,7 @@
  * @returns {string} 颜色字符串
  */
 export function tempToColor(temp) {
-  if (!temp || temp === undefined || temp === null) {
+  if (!Number.isFinite(temp)) {
     return '#999999'; // 默认灰色
   }
   
@@ -45,21 +45,24 @@ export function tempToColor(temp) {
  * @returns {object} 关节坐标
  */
 export function computeJoints2D(sample) {
-  // 如果没有身体坐标系数据，使用默认的人体模型
-  if (!sample || !sample.quaternions) {
-    return getDefaultJoints();
+  const baseJoints = getDefaultJoints();
+
+  if (!sample || typeof sample !== 'object') {
+    return baseJoints;
   }
-  
+
   try {
-    // 这里可以从四元数计算出关节角度
-    // 简化版：根据温度变化微调关节位置
-    const baseJoints = getDefaultJoints();
-    
-    // 模拟温度对姿势的影响
-    // 温度低时身体蜷缩，温度高时身体舒展
-    const avgTemp = (sample.temp1 + sample.temp2 + sample.temp3) / 3;
-    const tempFactor = (avgTemp - 36.5) / 2; // -1到1之间
-    
+    // 温度仅用于轻微调整姿势；只要存在非有限值就不参与计算，
+    // 避免把 NaN 传给 canvas 导致整张人体图无法绘制。
+    const temps = [sample.temp1, sample.temp2, sample.temp3];
+    const hasValidTemps = temps.every(Number.isFinite);
+    const avgTemp = hasValidTemps
+      ? temps.reduce((sum, value) => sum + value, 0) / temps.length
+      : null;
+    const tempFactor = avgTemp == null
+      ? 0
+      : Math.max(-1, Math.min(1, (avgTemp - 36.5) / 2));
+
     // 根据温度调整关节位置
     return {
       head: {
@@ -95,7 +98,7 @@ export function computeJoints2D(sample) {
     };
   } catch (error) {
     console.warn('计算关节位置失败:', error);
-    return getDefaultJoints();
+    return baseJoints;
   }
 }
 

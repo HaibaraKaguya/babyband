@@ -107,12 +107,16 @@ export default class DHModel {
 
   /**
    * 从四元数提取关节欧拉角（roll/pitch/yaw，单位°）
-   * @param {Array} quat - 四元数 [qw, qx, qy, qz]
+   * Accepts either `{ w, x, y, z }` or `[w, x, y, z]`; invalid input returns zeros.
+   * @param {Object|Array} quat
    * @returns {Object} {roll, pitch, yaw}
    */
   extractEulerAnglesFromQuat(quat) {
-    const q = Quaternion.fromArray(quat);
-    const euler = q.toEulerAngles(); // 需给Quaternion类扩展toEulerAngles方法
+    const q = Quaternion.fromQuaternionLike(quat);
+    if (!q || !q.isValid()) {
+      return { roll: 0, pitch: 0, yaw: 0 };
+    }
+    const euler = q.normalized().toEulerAngles();
     return {
       roll: euler.roll * 180 / Math.PI,
       pitch: euler.pitch * 180 / Math.PI,
@@ -122,10 +126,12 @@ export default class DHModel {
 
   /**
    * 基于传感器数据更新关节角度
-   * @param {Object} sensorData - 传感器四元数 {ankle, wrist, waist}
+   * @param {Object} sensorData - 传感器四元数 {ankle, wrist, waist}，对象或数组形式
    * @param {Object} bodyFrame - 身体坐标系 {X, Y, Z}
    */
   updateJointAngles(sensorData, bodyFrame) {
+    if (!sensorData || !bodyFrame) return;
+
     // 1. 提取脚踝/手腕的三轴角度（直接从传感器四元数转换）
     this.jointAngles.ankle = this.extractEulerAnglesFromQuat(sensorData.ankle);
     this.jointAngles.wrist = this.extractEulerAnglesFromQuat(sensorData.wrist);
@@ -171,9 +177,13 @@ export default class DHModel {
    * 辅助：计算膝关节角度
    */
   calculateKneeAngle(ankleQuat, bodyFrame) {
-    const q = Quaternion.fromArray(ankleQuat);
-    const ankleZ = q.rotateVector([0, 0, 1]); // 脚踝传感器Z轴在世界坐标系的方向
+    const q = Quaternion.fromQuaternionLike(ankleQuat);
+    if (!q || !q.isValid() || !bodyFrame || !Array.isArray(bodyFrame.Z)) {
+      return 0;
+    }
+    const ankleZ = q.normalized().rotateVector([0, 0, 1]); // 脚踝传感器Z轴在世界坐标系的方向
     const dot = this.dotProduct(ankleZ, bodyFrame.Z);
+    if (!Number.isFinite(dot)) return 0;
     return Math.acos(Math.max(-1, Math.min(1, dot))); // 限制范围避免NaN
   }
 
@@ -181,9 +191,13 @@ export default class DHModel {
    * 辅助：计算肘关节角度
    */
   calculateElbowAngle(wristQuat, bodyFrame) {
-    const q = Quaternion.fromArray(wristQuat);
-    const wristX = q.rotateVector([1, 0, 0]); // 手腕传感器X轴在世界坐标系的方向
+    const q = Quaternion.fromQuaternionLike(wristQuat);
+    if (!q || !q.isValid() || !bodyFrame || !Array.isArray(bodyFrame.X)) {
+      return 0;
+    }
+    const wristX = q.normalized().rotateVector([1, 0, 0]); // 手腕传感器X轴在世界坐标系的方向
     const dot = this.dotProduct(wristX, bodyFrame.X);
+    if (!Number.isFinite(dot)) return 0;
     return Math.acos(Math.max(-1, Math.min(1, dot)));
   }
 
@@ -210,6 +224,13 @@ export default class DHModel {
    * 获取最终关节角度
    */  
   getJointAngles() {
-    return { ...this.jointAngles };
+    return {
+      hip: this.jointAngles.hip,
+      knee: this.jointAngles.knee,
+      shoulder: this.jointAngles.shoulder,
+      elbow: this.jointAngles.elbow,
+      ankle: { ...this.jointAngles.ankle },
+      wrist: { ...this.jointAngles.wrist }
+    };
   }
 }

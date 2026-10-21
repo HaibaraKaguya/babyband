@@ -1,0 +1,46 @@
+{
+  "id": "procedural-infant-v1",
+  "type": "procedural-primitives",
+  "generatedAt": "2026-10-21",
+  "units": "meters",
+  "coordinateSystem": {
+    "x": "head / forward",
+    "y": "subject right",
+    "z": "up (supine baby)"
+  },
+  "dimensions": {
+    "overallLengthApprox": 0.7,
+    "headRadius": 0.083,
+    "torsoHalfExtents": [
+      0.155,
+      0.115,
+      0.068
+    ],
+    "upperArmLength": 0.115,
+    "forearmLength": 0.105,
+    "upperLegLength": 0.145,
+    "lowerLegLength": 0.135
+  },
+  "joints": [
+    "waist_joint",
+    "head_joint",
+    "left_arm_joint",
+    "right_arm_joint",
+    "left_leg_joint",
+    "right_leg_joint",
+    "right_elbow",
+    "knee_joint"
+  ],
+  "drivenJoints": {
+    "waist_joint": "q0",
+    "right_arm_joint": "q1 relative to q0",
+    "right_leg_joint": "q2 relative to q0"
+  },
+  "limitations": [
+    "Stylised proportions, not an anatomical or clinical model.",
+    "No skinning; limbs are rigid groups.",
+    "Only one wrist and one ankle sensor exist, so elbow/knee flexion is not inferred.",
+    "Sensor mounting orientation is not calibrated; offset quaternions are identity by default.",
+    "No external infant mesh is bundled. This is a procedural fallback asset."
+  ]
+}

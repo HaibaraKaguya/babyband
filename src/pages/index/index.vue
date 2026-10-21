@@ -28,6 +28,10 @@
 	  </view>
 	</view>
 
+    <view style="margin-top: 12px; color: #666;">
+      数据来源：{{ isBluetoothConnected ? '蓝牙设备' : '演示数据' }} · 已拒绝样本：{{ rejectedSamples }}
+      <view v-if="recordingPaused" style="color: #c62828;">记录已暂停，待保存数据仍保留，请点击停止记录重试。</view>
+    </view>
     <!-- ===== 新增：算法状态显示区域 ===== -->
     <view style="margin-top: 20px; background: #f8f9fa; padding: 12px; border-radius: 8px;">
       <text style="font-weight: bold;">身体坐标系反推算法</text>
@@ -117,9 +121,14 @@
       </view>
     </view>
 	
-    <!-- ===== 原有UI区域（完全不变） ===== -->
     <view style="margin-top: 20px;">
-      <text>设备数据（当前为协议模拟帧 → 走解析器）：</text>
+      <text style="font-weight: bold;">实时人体姿态</text>
+      <HumanPose3D :pose="currentPoseFrame" :height="320" />
+      <text style="font-size: 12px; color: #666;">腰、腕、踝传感器驱动的简化人体示意；未测量关节为估计姿态。</text>
+    </view>
+    <!-- 设备原始数值 -->
+    <view style="margin-top: 20px;">
+      <text>设备数据：</text>
       <view style="margin-top: 10px; white-space: pre-line;">
         {{ dataText }}
       </view>
@@ -143,7 +152,7 @@
       记录状态：<text :style="{color: isRecording ? '#d9534f' : '#666'}">
         {{ isRecording ? '录制中' : '未录制' }}
       </text>
-      <view v-if="isRecording">已记录采样：{{ sessionSamples.length }} 条</view>
+      <view v-if="isRecording">已记录采样：{{ recordedSampleCount }} 条</view>
     </view>
     
     <!-- 原有报警记录 -->
@@ -153,21 +162,26 @@
         暂无报警
       </view>
       <view v-for="(e, idx) in events" :key="idx" style="margin-top: 8px;">
-        {{ idx + 1 }}. {{ e.time }} - 温度下降 {{ e.drop }}℃
+        {{ idx + 1 }}. {{ e.time }} - {{ e.type === 'kick' ? '疑似踢被' : '温度变化 ' + e.drop + '℃' }}
       </view>
     </view>
   </view>
 </template>
 
 <script>
+import HumanPose3D from '@/components/HumanPose3D/HumanPose3D.vue'
 import { genMockSample } from '@/mock/deviceData.js'
-import AlgorithmManager from '@/utils/algorithms/AlgorithmManager.jsx'
+import AlgorithmManager from '@/utils/algorithms/AlgorithmManager.js'
 import BluetoothManager from '@/utils/bluetooth/BluetoothManager.js' // 新增
 
+import { createSampleGuard } from '@/utils/sampleGuard.js'
+
 const EVENTS_KEY = 'baby_band_events_v1'
-const SESSION_KEY = 'baby_band_last_session_v1'
+import { ChunkedSessionRepository } from '@/repositories/chunkedSessionRepository.mjs'
+import { createUniKeyValueStorage } from '@/repositories/keyValueStorage.mjs'
 
 export default {
+  components: { HumanPose3D },
   data() {
     return {
       dataText: '暂无数据',
@@ -175,8 +189,12 @@ export default {
       lastAlarmTs: 0,
       events: [],
       isRecording: false,
+      recordingPaused: false,
       sessionStartTs: 0,
       sessionSamples: [],
+      recordedSampleCount: 0,
+      sessionRepository: null,
+      activeSessionId: null,
       
       // ===== 新增：算法相关数据 =====
       algorithmManager: null,
@@ -214,10 +232,16 @@ export default {
       availableDevices: [], // 新增，用于显示扫描到的设备列表
       realDataSample: null,
       pollingTimer: null,
+      sampleGuard: null,
+      currentPoseFrame: null,
+      connectionStateHandler: null,
+      rejectedSamples: 0,
     }
   },
 
   onLoad() {
+    this.sessionRepository = new ChunkedSessionRepository({ storage: createUniKeyValueStorage(uni) })
+    this.sampleGuard = createSampleGuard()
     this.loadEvents()
     
     // 初始化算法管理器
@@ -227,25 +251,57 @@ export default {
 
     // 初始化蓝牙管理器，并设置数据回调（关键修改：更新dataText）
     this.bluetoothManager.onDataReceived = (sample) => {
+      if (sample.crcOk === false || !this.sampleGuard.check(sample).accept) return
       this.realDataSample = sample
-      // 立即更新UI，不用等定时器
-      this.updateSensorData()
+      this.updateSensorData(sample)
     }
+
+    this.bluetoothManager.onSampleRejected = () => { this.rejectedSamples += 1 }
+    this.connectionStateHandler = (state) => {
+      if (state.deviceId === this.bluetoothManager.deviceId && !state.connected) {
+        this.isBluetoothConnected = false
+        this.realDataSample = null
+        this.sampleGuard.reset()
+        this.bluetoothManager.disconnect()
+      }
+    }
+    if (uni.onBLEConnectionStateChange) uni.onBLEConnectionStateChange(this.connectionStateHandler)
 
     // 启动蓝牙初始化
     this.initBluetooth()
   
     // 启动数据更新定时器
     this.pollingTimer = setInterval(() => {
-      this.updateSensorData()
+      if (!this.isBluetoothConnected) this.updateSensorData()
     }, 1000)
   },
 
-  onUnload() {
+  onShow() {
+    if (!this.pollingTimer) {
+      this.pollingTimer = setInterval(() => {
+        if (!this.isBluetoothConnected) this.updateSensorData()
+      }, 1000)
+    }
+  },
+
+  onHide() {
     if (this.pollingTimer) {
       clearInterval(this.pollingTimer)
       this.pollingTimer = null
     }
+    if (this.isRecording) this.flushSessionSamples()
+  },
+
+  onUnload() {
+    if (this.isRecording) this.stopSession()
+    if (this.pollingTimer) {
+      clearInterval(this.pollingTimer)
+      this.pollingTimer = null
+    }
+    if (uni.offBLEConnectionStateChange && this.connectionStateHandler) {
+      uni.offBLEConnectionStateChange(this.connectionStateHandler)
+    }
+    this.bluetoothManager.onDataReceived = null
     this.bluetoothManager.stopScan()
     if (this.bluetoothManager.isConnected) {
       this.bluetoothManager.disconnect()
@@ -287,7 +343,8 @@ export default {
 	  try {
 	    uni.showLoading({ title: '连接中...' })
 	    await this.bluetoothManager.connect(deviceId)
-	    this.isBluetoothConnected = true
+	    this.sampleGuard.reset()
+    this.isBluetoothConnected = true
 	    this.bluetoothManager.stopScan()
 	    uni.hideLoading()
 	    uni.showToast({ title: '连接成功', icon: 'success' })
@@ -301,31 +358,28 @@ export default {
 	disconnectBluetooth() {
 	  this.bluetoothManager.disconnect()
 	  this.isBluetoothConnected = false
-	  this.realDataSample = null // 清空真实数据，自动切回模拟
+	  this.realDataSample = null
+	  this.sampleGuard.reset()
 	  uni.showToast({ title: '已断开蓝牙连接', icon: 'none' })
 	},
 	
     /**
      * 更新传感器数据（整合原有逻辑）
      */
-    updateSensorData() {
-       // 1. 动态选择数据源：蓝牙连接成功则用真实数据，否则用模拟数据
-       let s;
-       if (this.isBluetoothConnected && this.realDataSample) {
-         s = this.realDataSample;
-         // 给真实数据补充UI需要的battery字段
-         s.battery = s.battery || 90;
-       } else {
-         s = genMockSample();
-       }
-     
+    updateSensorData(incomingSample = null) {
+       // BLE notifications drive real sampling; the timer only drives demo data.
+       if (this.isBluetoothConnected && !incomingSample) return
+       const s = incomingSample || genMockSample()
+       if (s.crcOk === false) return
        const tsStr = new Date(s.ts).toLocaleTimeString()
       
       // 2. 处理传感器数据（调用算法管理器）
       const algorithmResult = this.algorithmManager.processSensorData(s)
       
       // 3. 更新算法显示
+      this.currentPoseFrame = algorithmResult.poseFrame
       this.updateAlgorithmDisplay(algorithmResult)
+      this.updateAlignmentStatus()
       
       // 4. 更新坐标变换显示
       if (algorithmResult.coordinateTransforms) {
@@ -354,23 +408,16 @@ export default {
         `对齐状态：${this.alignmentStatus.isAligned ? '已对齐' : '未对齐'}`
 
       // 原有记录逻辑
-      if (this.isRecording) {
-        this.sessionSamples.push(s)
-        if (this.sessionSamples.length > 3600) this.sessionSamples.shift()
+      if (this.isRecording && !this.recordingPaused) {
+        if (this.sessionSamples.length < 20) { this.sessionSamples.push(s); this.recordedSampleCount += 1 }
+        if (this.sessionSamples.length >= 20) this.flushSessionSamples()
       }
 
-      // 原有温度报警逻辑
-      this.historyT3.push({ ts: s.ts, v: s.temp3 })
-      if (this.historyT3.length > 12) this.historyT3.shift()
-
-      const now = s.ts
-      const cooldownOk = now - this.lastAlarmTs > 30000
-
-      if (this.historyT3.length >= 9 && cooldownOk) {
-        const old = this.historyT3[this.historyT3.length - 9].v
-        const drop = old - s.temp3
-        if (drop >= 0.6) this.raiseAlarm(now, drop)
+      // Alarm wording follows the actual detector output rather than a temperature proxy.
+      if (algorithmResult.kickDetected?.detected && s.ts - this.lastAlarmTs > 30000) {
+        this.raiseAlarm(s.ts, null, 'kick')
       }
+
     },
     // ===== 新增：算法相关方法 =====
     updateAlgorithmDisplay(result) {
@@ -568,22 +615,33 @@ export default {
     saveEvents() {
       try {
         uni.setStorageSync(EVENTS_KEY, JSON.stringify(this.events))
-      } catch (e) {}
+      } catch (e) {
+        uni.showToast({ title: '提醒记录保存失败', icon: 'none' })
+      }
     },
 
-    raiseAlarm(now, drop) {
+    raiseAlarm(now, drop, kind = 'temperature') {
       this.lastAlarmTs = now
 
       this.events.unshift({
+        ts: now,
+        type: kind,
         time: new Date(now).toLocaleTimeString(),
-        drop: Number(drop).toFixed(2)
+        drop: drop == null ? '-' : Number(drop).toFixed(2)
       })
       if (this.events.length > 5) this.events.pop()
       this.saveEvents()
+      if (this.isRecording && this.activeSessionId) {
+        try {
+          this.sessionRepository.appendEvent(this.activeSessionId, this.events[0])
+        } catch (error) {
+          uni.showToast({ title: '告警归档失败，请检查存储空间', icon: 'none' })
+        }
+      }
 
       uni.showModal({
-        title: '踢被提醒',
-        content: `检测到体表温度快速下降（约 ${Number(drop).toFixed(2)}℃），请查看宝宝是否踢被。`,
+        title: kind === 'kick' ? '疑似踢被提醒' : '温度变化提醒',
+        content: kind === 'kick' ? '姿态与温度联合规则触发，请查看宝宝状态。' : `检测到体表温度变化（约 ${Number(drop).toFixed(2)}℃），请查看宝宝状态。`,
         showCancel: false
       })
     },
@@ -599,23 +657,47 @@ export default {
     },
 
     startSession() {
-      this.isRecording = true
-      this.sessionStartTs = Date.now()
-      this.sessionSamples = []
-      uni.showToast({ title: '开始记录', icon: 'none' })
+      try {
+        const session = this.sessionRepository.createSession({
+          startTs: Date.now(),
+          meta: { source: this.isBluetoothConnected ? 'ble' : 'demo' }
+        })
+        this.activeSessionId = session.id
+        this.sessionStartTs = session.startTs
+        this.sessionSamples = []
+        this.recordedSampleCount = 0
+        this.isRecording = true
+        this.recordingPaused = false
+        uni.showToast({ title: '开始记录', icon: 'none' })
+      } catch (error) {
+        uni.showToast({ title: '无法创建记录，请检查存储空间', icon: 'none' })
+      }
+    },
+
+    // Keep a small retryable buffer; chunked persistence avoids whole-night JSON writes.
+    flushSessionSamples() {
+      if (!this.activeSessionId || !this.sessionSamples.length) return true
+      try {
+        this.sessionRepository.appendSamples(this.activeSessionId, this.sessionSamples)
+        this.sessionSamples = []
+        return true
+      } catch (error) {
+        this.recordingPaused = true
+        uni.showToast({ title: '记录暂停，请点击停止重试保存', icon: 'none' })
+        return false
+      }
     },
 
     stopSession() {
-      const endTs = Date.now()
-      const session = {
-        startTs: this.sessionStartTs,
-        endTs,
-        samples: this.sessionSamples,
-        events: this.events
+      if (!this.activeSessionId || !this.flushSessionSamples()) return
+      try {
+        this.sessionRepository.finalizeSession(this.activeSessionId, { endTs: Date.now() })
+        this.isRecording = false
+        this.activeSessionId = null
+        uni.showToast({ title: '已保存本次记录', icon: 'none' })
+      } catch (error) {
+        uni.showToast({ title: '保存失败，请释放存储空间后重试', icon: 'none' })
       }
-      uni.setStorageSync(SESSION_KEY, JSON.stringify(session))
-      this.isRecording = false
-      uni.showToast({ title: '已保存本次记录', icon: 'none' })
     },
 
     goHistory() {
